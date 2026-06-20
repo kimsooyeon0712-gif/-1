@@ -12,11 +12,12 @@
         body { font-family: 'Malgun Gothic', '맑은 고딕', sans-serif; padding: 20px; max-width: 900px; margin: 0 auto; background-color: #f8f9fa; color: #343a40; }
         h2 { text-align: center; color: #212529; }
         .box { background: white; border: 1px solid #dee2e6; padding: 25px; border-radius: 10px; margin-bottom: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-        input[type="file"] { margin-top: 10px; }
+        input[type="file"] { margin-top: 10px; font-size: 15px; }
+        
+        .upload-btn-wrapper { margin-bottom: 15px; }
         button.action-btn { width: 100%; padding: 15px; background-color: #4dabf7; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold; transition: 0.2s; }
         button.action-btn:hover { background-color: #3bc9db; }
         
-        /* 썸네일 미리보기 영역 스타일 */
         #previewContainer {
             display: flex;
             flex-wrap: wrap;
@@ -28,25 +29,25 @@
             border-radius: 8px;
             border: 2px dashed #adb5bd;
         }
-        /* 개별 페이지 아이템 */
         .page-item {
             position: relative;
             background: white;
             padding: 10px;
             border: 1px solid #ced4da;
             border-radius: 6px;
-            cursor: grab; /* 마우스 올렸을 때 손바닥 모양 */
+            cursor: grab;
             box-shadow: 0 2px 5px rgba(0,0,0,0.1);
             display: flex;
             flex-direction: column;
             align-items: center;
             transition: transform 0.1s;
         }
-        .page-item:active { cursor: grabbing; transform: scale(1.05); } /* 클릭 시 살짝 커지는 효과 */
+        .page-item:active { cursor: grabbing; transform: scale(1.05); }
+        .sortable-ghost { opacity: 0.4; }
+        
         canvas { border: 1px solid #e9ecef; max-width: 140px; height: auto; pointer-events: none; }
         .page-number { margin-top: 8px; font-size: 14px; font-weight: bold; color: #495057; pointer-events: none; }
         
-        /* 개별 페이지 삭제(X) 버튼 */
         .delete-btn {
             position: absolute;
             top: -10px;
@@ -76,9 +77,12 @@
     <h2>🎨 PDF 시각적 편집기</h2>
     
     <div class="box">
-        <label><strong>1. PDF 파일 선택 (여러 개 선택 가능):</strong></label><br>
-        <input type="file" id="pdfInput" multiple accept="application/pdf">
-        <div id="loadingMsg">PDF를 불러오고 화면을 구성하는 중입니다. 잠시만 기다려주세요... ⏳</div>
+        <label><strong>1. PDF 파일 추가하기 (계속 이어서 업로드 가능):</strong></label><br>
+        <div class="upload-btn-wrapper">
+            <input type="file" id="pdfInput" multiple accept="application/pdf">
+        </div>
+        <p style="font-size: 13px; color: #666; margin: 0;">* 파일을 추가할 때마다 기존 페이지 맨 뒤에 누적되어 표시됩니다.</p>
+        <div id="loadingMsg">PDF를 불러오는 중입니다... ⏳</div>
     </div>
 
     <div class="box">
@@ -93,14 +97,13 @@
     </div>
 
     <script>
-        // pdf.js 워커(내부 처리기) 설정 필수
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
 
-        let mergedPdfDoc = null; // 원본이 하나로 합쳐진 PDF 데이터 보관용
+        let masterPdfDoc = null; // 뒤에서 원본 페이지들을 담아둘 마스터 그릇
+        let totalPagesInMaster = 0; // 누적된 총 페이지 수
 
         document.getElementById('pdfInput').addEventListener('change', handleFileSelect);
 
-        // 파일이 업로드되면 실행되는 함수
         async function handleFileSelect(event) {
             const files = event.target.files;
             if (files.length === 0) return;
@@ -109,105 +112,115 @@
             const loadingMsg = document.getElementById('loadingMsg');
             const downloadBtn = document.getElementById('downloadBtn');
             
-            previewContainer.innerHTML = ''; // 기존 내용 지우기
+            // 최초에 있는 '비어있음' 메시지 지우기
+            const emptyMsg = previewContainer.querySelector('.empty-msg');
+            if (emptyMsg) emptyMsg.remove();
+
             loadingMsg.style.display = 'block';
-            downloadBtn.style.display = 'none';
 
             try {
                 const { PDFDocument } = PDFLib;
-                mergedPdfDoc = await PDFDocument.create();
+                
+                // 처음 파일을 올릴 때만 마스터 문서를 새로 만듦
+                if (!masterPdfDoc) {
+                    masterPdfDoc = await PDFDocument.create();
+                }
 
-                // 1. 업로드된 모든 파일을 백그라운드에서 하나의 PDF로 병합
+                // 업로드된 파일들을 순서대로 처리
                 for (let file of files) {
                     const arrayBuffer = await file.arrayBuffer();
-                    const pdf = await PDFDocument.load(arrayBuffer);
-                    const copiedPages = await mergedPdfDoc.copyPages(pdf, pdf.getPageIndices());
-                    copiedPages.forEach((page) => mergedPdfDoc.addPage(page));
+                    
+                    // 1. pdf-lib로 읽어서 마스터 문서에 페이지 복사
+                    const pdfLibDoc = await PDFDocument.load(arrayBuffer);
+                    const copiedPages = await masterPdfDoc.copyPages(pdfLibDoc, pdfLibDoc.getPageIndices());
+                    
+                    // 2. 화면에 그리기 위해 pdf.js로 방금 올린 파일만 로드
+                    const pdfjsDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                    const numPages = pdfjsDoc.numPages;
+
+                    for (let i = 1; i <= numPages; i++) {
+                        // 마스터 문서에 복사해둔 페이지 데이터를 실제로 추가
+                        masterPdfDoc.addPage(copiedPages[i - 1]);
+
+                        // 화면 캔버스 렌더링
+                        const page = await pdfjsDoc.getPage(i);
+                        const viewport = page.getViewport({ scale: 0.5 });
+
+                        const canvas = document.createElement('canvas');
+                        const context = canvas.getContext('2d');
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+
+                        await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+                        // UI 묶음 생성
+                        const pageItem = document.createElement('div');
+                        pageItem.className = 'page-item';
+                        // 이 페이지가 마스터 문서에서 몇 번째 인덱스인지 기억 (중요)
+                        pageItem.dataset.originalIndex = totalPagesInMaster; 
+
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.className = 'delete-btn';
+                        deleteBtn.innerHTML = '✕';
+                        deleteBtn.title = '이 페이지 삭제';
+                        deleteBtn.onclick = function() {
+                            pageItem.remove(); 
+                        };
+
+                        const pageLabel = document.createElement('div');
+                        pageLabel.className = 'page-number';
+                        pageLabel.innerText = (totalPagesInMaster + 1) + '페이지';
+
+                        pageItem.appendChild(deleteBtn);
+                        pageItem.appendChild(canvas);
+                        pageItem.appendChild(pageLabel);
+                        previewContainer.appendChild(pageItem);
+
+                        totalPagesInMaster++; // 누적 수치 증가
+                    }
                 }
 
-                // 2. 병합된 PDF 데이터를 화면에 그리기 위해 pdf.js로 넘김
-                const mergedPdfBytes = await mergedPdfDoc.save();
-                const loadingTask = pdfjsLib.getDocument({ data: mergedPdfBytes });
-                const pdfjsDoc = await loadingTask.promise;
-
-                const numPages = pdfjsDoc.numPages;
-
-                // 3. 각 페이지를 반복하며 캔버스(이미지)로 그려서 화면에 추가
-                for (let i = 1; i <= numPages; i++) {
-                    const page = await pdfjsDoc.getPage(i);
-                    const viewport = page.getViewport({ scale: 0.5 }); // 크기 50% 축소
-
-                    const canvas = document.createElement('canvas');
-                    const context = canvas.getContext('2d');
-                    canvas.height = viewport.height;
-                    canvas.width = viewport.width;
-
-                    const renderContext = { canvasContext: context, viewport: viewport };
-                    await page.render(renderContext).promise;
-
-                    // UI 묶음 생성
-                    const pageItem = document.createElement('div');
-                    pageItem.className = 'page-item';
-                    pageItem.dataset.originalIndex = i - 1; // 나중에 저장할 때를 위해 원본 번호 기억 (0부터 시작)
-
-                    // 삭제 버튼
-                    const deleteBtn = document.createElement('button');
-                    deleteBtn.className = 'delete-btn';
-                    deleteBtn.innerHTML = '✕';
-                    deleteBtn.title = '이 페이지 삭제';
-                    deleteBtn.onclick = function() {
-                        pageItem.remove(); // 버튼 클릭 시 화면에서 요소를 날려버림
-                    };
-
-                    // 페이지 번호 텍스트
-                    const pageLabel = document.createElement('div');
-                    pageLabel.className = 'page-number';
-                    pageLabel.innerText = i + '페이지';
-
-                    pageItem.appendChild(deleteBtn);
-                    pageItem.appendChild(canvas);
-                    pageItem.appendChild(pageLabel);
-                    previewContainer.appendChild(pageItem);
+                // SortableJS(드래그 앤 드롭) 기능 최초 1회만 켜기
+                if (!window.isSortableInit) {
+                    new Sortable(previewContainer, {
+                        animation: 150,
+                        ghostClass: 'sortable-ghost'
+                    });
+                    window.isSortableInit = true;
                 }
-
-                // 4. SortableJS로 드래그 앤 드롭 기능 켜기
-                new Sortable(previewContainer, {
-                    animation: 150,
-                    ghostClass: 'sortable-ghost' // 드래그 중인 아이템의 투명도 등 클래스 지원
-                });
 
                 loadingMsg.style.display = 'none';
                 downloadBtn.style.display = 'block';
+                
+                // ★ 같은 파일을 다시 선택하거나 다음 파일을 이어서 선택할 수 있도록 input 초기화
+                event.target.value = '';
 
             } catch (error) {
                 console.error(error);
-                alert("PDF를 처리하는 중 오류가 발생했습니다. 브라우저 콘솔을 확인해주세요.");
+                alert("PDF를 처리하는 중 오류가 발생했습니다.");
                 loadingMsg.style.display = 'none';
             }
         }
 
-        // 다운로드 버튼을 누르면 실행되는 함수
         async function generateAndDownloadPDF() {
-            if (!mergedPdfDoc) return alert("먼저 PDF 파일을 업로드해주세요.");
+            if (!masterPdfDoc) return alert("먼저 PDF 파일을 업로드해주세요.");
 
             const previewContainer = document.getElementById('previewContainer');
-            // 화면에 남아있는 페이지 아이템들을 위에서부터 순서대로 가져옴
             const pageItems = previewContainer.querySelectorAll('.page-item');
             
-            if (pageItems.length === 0) return alert("저장할 페이지가 없습니다. 모든 페이지가 삭제되었습니다.");
+            if (pageItems.length === 0) return alert("저장할 페이지가 없습니다.");
 
             try {
                 const { PDFDocument } = PDFLib;
                 const finalPdf = await PDFDocument.create();
 
-                // 화면상에 배치된 순서대로 원본 번호를 읽어와서 최종 PDF 조립
+                // 화면에 남아있는(그리고 드래그로 순서가 바뀐) 요소들의 인덱스를 순서대로 읽어서 새 PDF 조립
                 for (let item of pageItems) {
                     const originalIndex = parseInt(item.dataset.originalIndex);
-                    const [copiedPage] = await finalPdf.copyPages(mergedPdfDoc, [originalIndex]);
+                    const [copiedPage] = await finalPdf.copyPages(masterPdfDoc, [originalIndex]);
                     finalPdf.addPage(copiedPage);
                 }
 
-                // 다운로드 실행
                 const pdfBytes = await finalPdf.save();
                 const blob = new Blob([pdfBytes], { type: "application/pdf" });
                 const link = document.createElement('a');
